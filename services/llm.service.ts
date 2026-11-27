@@ -9,14 +9,46 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "API_KEY" });
 // Melhores modelos FREE:
 // gemini-3.5-flash-lite
 // gemini-3.1-flash-lite
-const modeloIA = "gemini-3.5-flash-lite";
+const modeloIA = process.env.MODELO_IA || "gemini-3.5-flash-lite";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function analisarPdfComGemini(caminhoPdf: string) {
+export type DadosLaudo = {
+  titulo: string | null;
+  descricao: string | null;
+  agentesNocivos: string[];
+  cnae: string | null;
+  cnpj: string | null;
+  ano: number | null;
+  ramo: string | null;
+  setores: string[];
+  funcoes: string[];
+};
+
+/**
+ * Regra de negócio: o laudo só é salvo se tiver pelo menos UMA destas
+ * informações: agente nocivo, ramo, setor ou função.
+ */
+export function temDadosUteis(dados: DadosLaudo): boolean {
+  return (
+    dados.agentesNocivos.length > 0 ||
+    !!dados.ramo ||
+    dados.setores.length > 0 ||
+    dados.funcoes.length > 0
+  );
+}
+
+/**
+ * Devolve os dados extraídos, ou null quando a chamada FALHOU (API fora do ar,
+ * limite estourado, arquivo ausente, resposta inválida). Falha não é "laudo sem
+ * dados": quem chama deve pular o arquivo e tentar de novo numa próxima execução.
+ */
+export async function analisarPdfComGemini(
+  caminhoPdf: string,
+): Promise<DadosLaudo | null> {
   if (!fs.existsSync(caminhoPdf)) {
     console.warn(`⚠️ Arquivo não encontrado: ${caminhoPdf}`);
-    return gerarFallback();
+    return null;
   }
 
   // Lê o arquivo PDF em buffer e converte para Base64
@@ -25,7 +57,7 @@ export async function analisarPdfComGemini(caminhoPdf: string) {
 
   const MAX_TENTATIVAS = 3;
   let tentativaAtual = 0;
-  let tempoEspera = 5000;
+  let tempoEspera = 15000;
 
   while (tentativaAtual < MAX_TENTATIVAS) {
     try {
@@ -120,46 +152,30 @@ export async function analisarPdfComGemini(caminhoPdf: string) {
           : [],
       };
     } catch (error: any) {
-      if (error.status === 503) {
+      // 503 (servidor ocupado) e 429 (limite por minuto) são temporários: tenta de novo.
+      if (error.status === 503 || error.status === 429) {
         tentativaAtual++;
+        const motivo =
+          error.status === 429 ? "Limite de requisições" : "Servidor ocupado";
         console.log(
-          `\n   ⚠️ [Servidor Ocupado - Erro ${error.status}] Tentativa ${tentativaAtual} de ${MAX_TENTATIVAS}. Aguardando ${tempoEspera / 1000}s para tentar de novo...`,
+          `\n   ⚠️ [${motivo} - Erro ${error.status}] Tentativa ${tentativaAtual} de ${MAX_TENTATIVAS}. Aguardando ${tempoEspera / 1000}s para tentar de novo...`,
         );
-
-        if (error.status === 429) {
-          console.error(
-            `O Limite de requisições no modelo ${modeloIA} foi atingido.`,
-          );
-          return gerarFallback();
-        }
 
         if (tentativaAtual >= MAX_TENTATIVAS) {
           console.error(
-            `❌ Falha definitiva após ${MAX_TENTATIVAS} tentativas para o arquivo: ${caminhoPdf}`,
+            `❌ Falha definitiva após ${MAX_TENTATIVAS} tentativas (modelo ${modeloIA}) para o arquivo: ${caminhoPdf}`,
           );
-          return gerarFallback();
+          return null;
         }
 
         await sleep(tempoEspera);
         tempoEspera *= 2;
       } else {
         console.error(`❌ Erro ao processar PDF com Gemini:`, error);
-        return gerarFallback();
+        return null;
       }
     }
   }
-}
 
-function gerarFallback() {
-  return {
-    titulo: null,
-    descricao: null,
-    agentesNocivos: [],
-    cnae: null,
-    cnpj: null,
-    ano: null,
-    ramo: null,
-    setores: [],
-    funcoes: [],
-  };
+  return null;
 }
