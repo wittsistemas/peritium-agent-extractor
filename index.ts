@@ -11,6 +11,7 @@ import {
   temDadosUteis,
 } from "./services/llm.service.js";
 
+import { chaveEmpresa } from "./services/nome-empresa.js";
 import "dotenv/config";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -41,6 +42,13 @@ async function rodarAgenteExtractor() {
 
     const empresaRepo = AppDataSource.getRepository(Empresa);
     const laudoRepo = AppDataSource.getRepository(Laudo);
+
+    // Mapa chave -> id das empresas já cadastradas, para unir "X LTDA" e "X LTDA ME".
+    const empresaPorChave = new Map<string, string>();
+    for (const e of await empresaRepo.find({ select: { id: true, razao_social: true } })) {
+      const k = chaveEmpresa(e.razao_social);
+      if (!empresaPorChave.has(k)) empresaPorChave.set(k, e.id);
+    }
 
     for (const pastaEstadoDir of subpastas(caminhoRaiz)) {
       if (!ehSiglaUf(pastaEstadoDir.name)) {
@@ -111,6 +119,7 @@ async function rodarAgenteExtractor() {
               // Empresa e laudo na mesma transação: se o laudo falhar, a empresa
               // não fica órfã. O ramo é cortado em 150 (varchar(150) no banco).
               const ramo = ia.ramo ? ia.ramo.trim().slice(0, 150) : undefined;
+              let empresaCriadaId: string | null = null;
               await AppDataSource.transaction(async (manager) => {
                 const empresaTx = manager.getRepository(Empresa);
                 let empresaEntity = null;
@@ -122,6 +131,10 @@ async function rodarAgenteExtractor() {
                   empresaEntity = await empresaTx.findOne({
                     where: { razao_social: nomeEmpresaLimpo },
                   });
+                // Nome parecido (só muda LTDA/ME/acento/pontuação): reaproveita a empresa.
+                const idParecida = empresaPorChave.get(chaveEmpresa(nomeEmpresaLimpo));
+                if (!empresaEntity && idParecida)
+                  empresaEntity = await empresaTx.findOne({ where: { id: idParecida } });
 
                 if (!empresaEntity) {
                   empresaEntity = empresaTx.create({
@@ -150,7 +163,11 @@ async function rodarAgenteExtractor() {
                   empresa: empresaEntity,
                 } as any);
                 await laudoTx.save(novoLaudo);
+                empresaCriadaId = empresaEntity.id;
               });
+              // Só registra no mapa depois que a transação confirmou.
+              if (empresaCriadaId)
+                empresaPorChave.set(chaveEmpresa(nomeEmpresaLimpo), empresaCriadaId);
               resumo.importados++;
               console.log(
                 `💾 Laudo salvo: ${nomeEmpresaLimpo} (Setores: ${ia.setores.join(", ") || "Nenhum"})`,
