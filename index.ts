@@ -108,43 +108,49 @@ async function rodarAgenteExtractor() {
                 continue;
               }
 
-              let empresaEntity = null;
-              if (ia.cnpj)
-                empresaEntity = await empresaRepo.findOne({
-                  where: { cnpj: ia.cnpj },
-                });
-              if (!empresaEntity)
-                empresaEntity = await empresaRepo.findOne({
-                  where: { razao_social: nomeEmpresaLimpo },
-                });
+              // Empresa e laudo na mesma transação: se o laudo falhar, a empresa
+              // não fica órfã. O ramo é cortado em 150 (varchar(150) no banco).
+              const ramo = ia.ramo ? ia.ramo.trim().slice(0, 150) : undefined;
+              await AppDataSource.transaction(async (manager) => {
+                const empresaTx = manager.getRepository(Empresa);
+                let empresaEntity = null;
+                if (ia.cnpj)
+                  empresaEntity = await empresaTx.findOne({
+                    where: { cnpj: ia.cnpj },
+                  });
+                if (!empresaEntity)
+                  empresaEntity = await empresaTx.findOne({
+                    where: { razao_social: nomeEmpresaLimpo },
+                  });
 
-              if (!empresaEntity) {
-                empresaEntity = empresaRepo.create({
-                  razao_social: nomeEmpresaLimpo,
-                  ...(ia.cnpj && { cnpj: ia.cnpj }),
-                });
-                await empresaRepo.save(empresaEntity);
-              } else if (ia.cnpj && !empresaEntity.cnpj) {
-                empresaEntity.cnpj = ia.cnpj;
-                await empresaRepo.save(empresaEntity);
-              }
+                if (!empresaEntity) {
+                  empresaEntity = empresaTx.create({
+                    razao_social: nomeEmpresaLimpo,
+                    ...(ia.cnpj && { cnpj: ia.cnpj }),
+                  });
+                  await empresaTx.save(empresaEntity);
+                } else if (ia.cnpj && !empresaEntity.cnpj) {
+                  empresaEntity.cnpj = ia.cnpj;
+                  await empresaTx.save(empresaEntity);
+                }
 
-              const novoLaudo = laudoRepo.create({
-                titulo: ia.titulo || tituloArquivo,
-                descricao: ia.descricao || null,
-                uf: dadosEstado,
-                cidade: cidade.name,
-                cnae: ia.cnae || undefined,
-                agentesNocivos: ia.agentesNocivos,
-                ano: ia.ano ?? undefined,
-                ramo: ia.ramo ?? undefined,
-                setores: ia.setores,
-                funcoes: ia.funcoes,
-                caminhoArquivo: caminhoRelativo,
-                empresa: empresaEntity,
-              } as any);
-
-              await laudoRepo.save(novoLaudo);
+                const laudoTx = manager.getRepository(Laudo);
+                const novoLaudo = laudoTx.create({
+                  titulo: ia.titulo || tituloArquivo,
+                  descricao: ia.descricao || null,
+                  uf: dadosEstado,
+                  cidade: cidade.name,
+                  cnae: ia.cnae || undefined,
+                  agentesNocivos: ia.agentesNocivos,
+                  ano: ia.ano ?? undefined,
+                  ramo,
+                  setores: ia.setores,
+                  funcoes: ia.funcoes,
+                  caminhoArquivo: caminhoRelativo,
+                  empresa: empresaEntity,
+                } as any);
+                await laudoTx.save(novoLaudo);
+              });
               resumo.importados++;
               console.log(
                 `💾 Laudo salvo: ${nomeEmpresaLimpo} (Setores: ${ia.setores.join(", ") || "Nenhum"})`,
